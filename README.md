@@ -44,6 +44,13 @@ A professional, feature-rich status line script for Claude Code that provides re
 - **npm** (optional) - For automatic version checking
 - **Claude Code** - The script is designed specifically for Claude Code
 
+### Platform Support
+
+- ✅ **Linux** - Fully supported
+- ✅ **macOS** - Fully supported  
+- ✅ **Windows (WSL2)** - Works in Windows Subsystem for Linux 2
+- ❌ **Windows (Native)** - NOT supported (requires bash environment)
+
 ### Quick Install (One-liner) 🚀
 
 > ⚠️ **EARLY TEST VERSION - USE AT YOUR OWN RISK**

@@ -347,16 +347,12 @@ validate_version() {
     [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?$ ]]
 }
 
-# Function: Background version check with proper locking
+# Function: Version check with smart sync/async behavior
+# Runs synchronously on first execution (no cache file), async on subsequent runs
 check_for_updates() {
     local cache_file="$1"
     
-    # Check if npm is available first
-    if ! command -v npm >/dev/null 2>&1; then
-        log_info "npm not available - skipping version check"
-        return 1
-    fi
-    
+    # Dependencies should already be checked by caller
     # Try to acquire lock (non-blocking)
     if ! mkdir "$LOCKFILE" 2>/dev/null; then
         log_info "Update check already in progress"
@@ -364,38 +360,103 @@ check_for_updates() {
     fi
     
     if needs_version_check "$cache_file"; then
-        log_info "Starting background version check"
+        # Determine if this is first run (no cache file exists)
+        local is_first_run=false
+        if [[ ! -f "$cache_file" ]]; then
+            is_first_run=true
+            log_info "First run detected - running version check synchronously"
+        else
+            log_info "Cache exists but stale - running version check in background"
+        fi
         
-        # Run in background to avoid blocking
-        (
+        # Define the version check logic as a function to avoid duplication
+        run_version_check() {
             # Ensure cleanup on exit
-            trap 'rmdir "$LOCKFILE" 2>/dev/null || true' EXIT
+            local cleanup_performed=false
+            cleanup_version_check() {
+                if [[ "$cleanup_performed" == false ]]; then
+                    cleanup_performed=true
+                    rmdir "$LOCKFILE" 2>/dev/null || true
+                    log_debug "Version check cleanup completed"
+                fi
+            }
+            trap cleanup_version_check EXIT
             
+            log_info "Starting npm version check for $NPM_PACKAGE"
             local latest
-            # Use timeout if available
+            
+            # Ensure .claude directory exists before attempting to write cache
+            if [[ ! -d "$CLAUDE_DIR" ]]; then
+                mkdir -p "$CLAUDE_DIR" 2>/dev/null || {
+                    log_error "Cannot create .claude directory: $CLAUDE_DIR"
+                    return 1
+                }
+            fi
+            
+            # Use timeout if available to prevent hanging (15 seconds for npm operations)
             if command -v timeout >/dev/null 2>&1; then
-                latest=$(timeout 5 npm view "$NPM_PACKAGE" version 2>/dev/null)
+                log_debug "Using timeout for npm command (15s timeout)"
+                latest=$(timeout 15 npm view "$NPM_PACKAGE" version 2>/dev/null) || {
+                    local exit_code=$?
+                    if [[ $exit_code -eq 124 ]]; then
+                        log_info "npm command timed out after 15 seconds"
+                    else
+                        log_info "npm command failed with exit code: $exit_code"
+                    fi
+                    return 1
+                }
             else
-                latest=$(npm view "$NPM_PACKAGE" version 2>/dev/null)
+                log_debug "Running npm command without timeout"
+                latest=$(npm view "$NPM_PACKAGE" version 2>/dev/null) || {
+                    log_info "npm command failed"
+                    return 1
+                }
             fi
             
             # Validate and save version
             if [[ -n "$latest" ]] && validate_version "$latest"; then
-                # Atomic write
+                # Atomic write with better error handling
                 local temp_file="${cache_file}.tmp.$$"
-                echo "$latest" > "$temp_file"
-                mv -f "$temp_file" "$cache_file" 2>/dev/null || true
-                log_info "Updated version cache: $latest"
+                if echo "$latest" > "$temp_file" 2>/dev/null && mv "$temp_file" "$cache_file" 2>/dev/null; then
+                    log_info "Updated version cache: $latest"
+                    return 0
+                else
+                    log_error "Failed to write version cache file"
+                    rm -f "$temp_file" 2>/dev/null || true
+                    return 1
+                fi
             else
-                log_info "Failed to fetch valid version from npm"
+                log_info "Failed to fetch valid version from npm (got: '${latest:-empty}')"
+                return 1
             fi
-            
-            # Clean up lock
-            rmdir "$LOCKFILE" 2>/dev/null || true
-        ) &
+        }
         
-        # Store PID for potential cleanup
-        echo $! > "$PID_FILE" 2>/dev/null || true
+        if [[ "$is_first_run" == true ]]; then
+            # Run synchronously on first run to ensure cache is created before script exits
+            log_info "First run: executing version check synchronously"
+            if run_version_check; then
+                log_info "First run version check completed successfully"
+            else
+                log_info "First run version check failed, but continuing"
+            fi
+        else
+            # Run in background for subsequent runs to avoid blocking
+            log_info "Subsequent run: executing version check in background"
+            (
+                # Add small delay to ensure parent script has time to output statusline
+                sleep 0.1 2>/dev/null || true
+                if run_version_check; then
+                    log_debug "Background version check completed successfully"
+                else
+                    log_debug "Background version check failed"
+                fi
+            ) &
+            
+            # Store PID for potential cleanup
+            local bg_pid=$!
+            echo "$bg_pid" > "$PID_FILE" 2>/dev/null || true
+            log_debug "Background version check started with PID: $bg_pid"
+        fi
     else
         # Not time for update, remove lock
         rmdir "$LOCKFILE" 2>/dev/null || true
@@ -503,13 +564,20 @@ main() {
         log_info "Version not found, using fallback: $version"
     fi
     
-    # Check for updates (non-blocking, only if npm is available)
-    # Wrap in subshell to prevent any errors from affecting main flow
-    (
-        if command -v npm >/dev/null 2>&1 && needs_version_check "$VERSION_CACHE_FILE" 2>/dev/null; then
-            check_for_updates "$VERSION_CACHE_FILE" 2>/dev/null
+    # Check for updates with proper error handling
+    # First run (no cache): run synchronously to ensure completion
+    # Subsequent runs: run in background for non-blocking behavior
+    if check_dependencies 2>/dev/null; then
+        # Only proceed with version check if dependencies are available
+        if needs_version_check "$VERSION_CACHE_FILE"; then
+            log_info "Version check needed, initiating update check"
+            check_for_updates "$VERSION_CACHE_FILE"
+        else
+            log_info "Version cache is fresh, skipping update check"
         fi
-    ) 2>/dev/null || true
+    else
+        log_info "Dependencies not available, skipping version check"
+    fi
     
     # Get latest version if available
     local latest_version=""
