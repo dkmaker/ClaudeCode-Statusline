@@ -2,7 +2,7 @@
 
 #============================================================================
 # ClaudeCode Status Line Script (ccstatusline.sh)
-# Version: 1.0.0
+# Version: 1.0.1
 # Author: DKMaker with great help from Claude Code
 # License: MIT
 #
@@ -44,7 +44,7 @@ fi
 #============================================================================
 
 # Script metadata
-readonly SCRIPT_VERSION="3.2.0"
+readonly SCRIPT_VERSION="1.0.1"
 readonly SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -148,13 +148,9 @@ readonly OS_TYPE="$(uname -s)"
 cleanup() {
     local exit_code=$?
     
-    # Kill any background processes
+    # Clean up PID file but DON'T kill the background version check process
+    # We want it to continue running after the script exits to update the cache
     if [[ -f "$PID_FILE" ]]; then
-        local pid
-        pid=$(<"$PID_FILE") 2>/dev/null || true
-        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-            kill "$pid" 2>/dev/null || true
-        fi
         rm -f "$PID_FILE" 2>/dev/null || true
     fi
     
@@ -347,6 +343,43 @@ validate_version() {
     [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?$ ]]
 }
 
+# Function: Compare semantic versions
+# Returns: 0 if v1 < v2, 1 if v1 = v2, 2 if v1 > v2
+compare_versions() {
+    local v1="$1"
+    local v2="$2"
+    
+    # Remove any pre-release tags for comparison (e.g., -beta, -rc1)
+    local v1_base="${v1%%-*}"
+    local v2_base="${v2%%-*}"
+    
+    # Split versions into components
+    IFS='.' read -r -a v1_parts <<< "$v1_base"
+    IFS='.' read -r -a v2_parts <<< "$v2_base"
+    
+    # Compare major, minor, patch
+    for i in 0 1 2; do
+        local p1="${v1_parts[i]:-0}"
+        local p2="${v2_parts[i]:-0}"
+        
+        if (( p1 < p2 )); then
+            return 0  # v1 < v2
+        elif (( p1 > p2 )); then
+            return 2  # v1 > v2
+        fi
+    done
+    
+    # If base versions are equal, check pre-release tags
+    # No pre-release is considered newer than pre-release
+    if [[ "$v1" == *"-"* ]] && [[ "$v2" != *"-"* ]]; then
+        return 0  # v1 has pre-release, v2 doesn't - v2 is newer
+    elif [[ "$v1" != *"-"* ]] && [[ "$v2" == *"-"* ]]; then
+        return 2  # v1 has no pre-release, v2 does - v1 is newer
+    fi
+    
+    return 1  # versions are equal
+}
+
 # Function: Version check with smart sync/async behavior
 # Runs synchronously on first execution (no cache file), async on subsequent runs
 check_for_updates() {
@@ -473,9 +506,19 @@ get_latest_version() {
         latest_version=$(<"$cache_file")
         
         if [[ -n "$latest_version" ]] && [[ "$latest_version" != "$current_version" ]]; then
-            echo "$latest_version"
-            log_info "Update available: $current_version -> $latest_version"
-            return 0
+            # Compare versions to ensure latest is actually newer
+            if compare_versions "$current_version" "$latest_version"; then
+                # current_version < latest_version (update available)
+                echo "$latest_version"
+                log_info "Update available: $current_version -> $latest_version"
+                return 0
+            elif compare_versions "$latest_version" "$current_version"; then
+                # latest_version < current_version (user has newer version)
+                log_info "Current version ($current_version) is newer than npm version ($latest_version)"
+            else
+                # versions are equal
+                log_info "Versions are equal: $current_version = $latest_version"
+            fi
         fi
     fi
     

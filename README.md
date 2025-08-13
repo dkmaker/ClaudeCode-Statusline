@@ -2,7 +2,7 @@
 
 A professional, feature-rich status line script for Claude Code that provides real-time information about your development environment with automatic update notifications, intelligent logging, and beautiful visual indicators.
 
-![Version](https://img.shields.io/badge/version-3.2.0-blue)
+![Version](https://img.shields.io/badge/version-1.0.1-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Bash](https://img.shields.io/badge/bash-%3E%3D4.0-orange)
 
@@ -263,6 +263,7 @@ MIT License - See LICENSE file for details
 
 ## 📊 Version History
 
+- **1.0.1** - Fixed version comparison to properly handle newer local versions
 - **1.0.0** - Initial release
 
 ---
